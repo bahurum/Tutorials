@@ -3,6 +3,7 @@
 methods {
     // balanceOf doesn't depend on msg.sender, block.timestamp, ...
     balanceOf(address) returns (uint256) envfree;
+    allowance(address, address) returns (uint) envfree;
 }
 
 
@@ -23,7 +24,7 @@ rule transferIncreasesRecipientBalance {
     require e.msg.sender == sender;
     bool success = transfer(e, recipient, amount);
 
-    mathint balance_sender_before = balanceOf(sender);
+    mathint balance_sender_after = balanceOf(sender);
     mathint balance_recip_after   = balanceOf(recipient);
     mathint balance_other_after   = balanceOf(anybody_else);
 
@@ -50,29 +51,37 @@ rule transferIncreasesRecipientBalance {
 }
 
 definition insufficientBalance(env e, uint amount) returns bool =
-    amount > balanceOf(e.msg.sender) => lastReverted;
+    amount > balanceOf(e.msg.sender);
 
-definition transferWouldOverflow(address recipient, amount) returns bool =
-    balanceOf(recipient) + amount >= max_uint256;
+definition transferWouldOverflow(env e, address recipient, uint amount) returns bool =
+    (balanceOf(recipient) + amount > max_uint256) && (e.msg.sender != recipient);
 
 
 rule transferRevertConditions {
-    address recipient; address sender;
+    address recipient;
     uint amount;
+
+    env e;
+    require e.msg.value == 0; // call to transfer reverts if msg.value > 0
+
+    mathint balance_sender_before = balanceOf(e.msg.sender);
+    mathint balance_recip_before  = balanceOf(recipient);
+    bool insuffBalance = insufficientBalance(e, amount);
+    bool transfWouldOver = transferWouldOverflow(e, recipient, amount);
 
     transfer@withrevert(e, recipient, amount);
 
-    assert insufficientBalance(e, amount) => lastReverted,
+    assert insuffBalance => lastReverted,
         "transfer must revert if sender's balance is insufficient";
 
-    assert transferWouldOverflow(recipient, amount) => lastReverted,
+    assert transfWouldOver => lastReverted,
         "transfer must revert if recipient's account would overflow";
 
     assert recipient == 0 => lastReverted,
          "transfer must revert if recipient is 0";
 
-    assert lastReverted
-        => insufficientBalance(e, sender) || transferWouldOverflow(recipient, amount) || recipient == 0,
+    assert lastReverted 
+        => (insuffBalance || transfWouldOver || recipient == 0),
         "transfer must only revert if one of the three revert conditions is true";
 //
 //     The above only check that transfer _does_ revert as appropriate.  We also
@@ -81,8 +90,8 @@ rule transferRevertConditions {
 //     A good option is an "if and only if" expression:
 
     assert lastReverted <=> (
-        amount > balance_sender_before
-        || balance_recip_before + amount >= max_uint256
+        insuffBalance
+        || transfWouldOver
         || recipient == 0
     ), "transfer must revert if and only if the above conditions are violated";
 }
@@ -90,21 +99,20 @@ rule transferRevertConditions {
 rule onlyOwnerCanDecreaseBalance {
     address owner;
 
-    mathint balance_owner_before = balanceOf(owner);
-
     env e;
+
+    mathint balance_owner_before = balanceOf(owner);
+    mathint approved_from_owner_to_caller = allowance(owner, e.msg.sender);
+
     method f; calldataarg args;
     f(e, args);
 
     mathint balance_owner_after = balanceOf(owner);
 
-    assert balance_owner_before > balance_owner_after,
-        e.msg.sender == owner,
-        "only owner can decrease their own balance";
+    assert (approved_from_owner_to_caller == 0) && (balance_owner_before > balance_owner_after) 
+        => e.msg.sender == owner,
+        "only owner can decrease their own balance when didn' approve tokens";
 
     // Note: this rule is incorrect!  Fixing it is left as an exercise
 }
-
-
-
 
